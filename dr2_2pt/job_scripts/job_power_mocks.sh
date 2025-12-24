@@ -7,7 +7,7 @@
 #SBATCH -q regular
 #SBATCH -J mocks_pks
 #SBATCH -L SCRATCH
-#SBATCH -o slurm_outputs/holi_mocks_pks/%A_mock%a.log
+#SBATCH -o slurm_outputs/holi_mocks_pks_%A/mock%a.log
 #SBATCH --array=451-500,601-650
 
 set -e
