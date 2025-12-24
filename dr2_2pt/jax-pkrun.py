@@ -13,6 +13,8 @@ import itertools
 from pathlib import Path
 
 import numpy as np
+from datetime import datetime
+from time import time
 
 from mockfactory import setup_logging
 import lsstypes as types
@@ -181,6 +183,13 @@ def collect_argparser():
     return parser.parse_args()
     
 if __name__ == '__main__':
+    import jax
+    from jax import config
+    config.update('jax_enable_x64', True)
+    os.environ['XLA_PYTHON_CLIENT_MEM_FRACTION'] = '0.95'
+    jax.distributed.initialize()
+    from jaxpower.mesh import create_sharding_mesh
+    
     # gather arguments
     args = collect_argparser()
 
@@ -191,7 +200,11 @@ if __name__ == '__main__':
     logger.info(f"Arguments: {args}")
 
     # define important variables given by input arguments
-    zrange   = [float(iz) for iz in args.zrange]
+    zrange = [float(iz) for iz in args.zrange]
+    if len(zrange)%2 !=0:
+        raise ValueError(f"Redshift ranges should be given in pairs, got {zrange}")
+    else:
+        zrange = list(zip(zrange[::2],zrange[1::2]))      
     survey   = args.survey
     verspec  = args.verspec
     version  = args.version
@@ -221,147 +234,143 @@ if __name__ == '__main__':
     # get ouput directory (save to scratch by default)
     out_dir = args.outdir
 
-    # whether to use jax or not depending on requested task in todo list
-    #todo = ['mesh2_spectrum','window_mesh2_spectrum','combine']
+    # what to do?
     todo = args.todo
-    with_jax = any(td in ['auw', 'mesh2_spectrum', 'window_mesh2_spectrum', 'covariance_mesh2_spectrum', 'count2_correlation', 'count2_RR', 'covariance_mesh2_spectrum_pre_correlation_post'] for td in todo)
 
-    if with_jax:
-        import jax
-        from jax import config
-        config.update('jax_enable_x64', True)
-        os.environ['XLA_PYTHON_CLIENT_MEM_FRACTION'] = '0.95'
-        jax.distributed.initialize()
-        from jaxpower.mesh import create_sharding_mesh
-    else:
-        os.environ['XLA_PYTHON_CLIENT_MEM_FRACTION'] = '0.01'
+    # file to log date and time a file was made 
+    # and how much time it took to generate it.
+    logfn = out_dir+'clustering_log.txt'
+    if jax.process_index() == 0:
+        if not os.path.exists(out_dir):
+            os.makedirs(out_dir)
+        if not os.path.isfile(logfn):
+            with open(logfn, "a") as logf:
+                logf.write("File to log date and time a file was made and how much time it took to generate it.\n")
     
-    #for (tracer, zrange), region, version, weight_type in itertools.product(tracers, regions, versions, weight_types):
-    # iterate over regions
-    for region in regions:
-        cache = {}
-        # if 'BGS' in tracer:
-        #     tracer = 'BGS_BRIGHT-21.5' if 'dr1' in version else 'BGS_BRIGHT-21.35'
-        # Collect common arguments and then tracer specific variables in dictionaries
-        common_args = dict(zrange=zrange, nran=nran, base_dir=catalog_dir, region=region)
-        tracer_args  = dict(tracer=tracer, weight_type=weight_type)
-        if tracer2 is not None:
-            tracer2_args = dict(tracer=tracer2, weight_type=weight_type2)
-
-        # Collect spectrum arguments in a dictonary
-        spectrum_args = dict(boxsize=boxsize, cellsize=cellsize, ells=(0, 2, 4))
-        
-        # Collect other optional arguments in a dictionary and remove them from the 'weight_type' keys
-        meas_args = dict()
-        if weight_type.endswith('_thetacut'):
-            tracer_args['weight_type']  = weight_type[:-len('_thetacut')]
+    # iterate over redshift bins then regions
+    for i_zrange in zrange:
+        for region in regions:
+            cache = {}
+            # if 'BGS' in tracer:
+            #     tracer = 'BGS_BRIGHT-21.5' if 'dr1' in version else 'BGS_BRIGHT-21.35'
+            # Collect common arguments and then tracer specific variables in dictionaries
+            common_args = dict(zrange=i_zrange, nran=nran, base_dir=catalog_dir, region=region)
+            tracer_args  = dict(tracer=tracer, weight_type=weight_type)
             if tracer2 is not None:
-                tracer2_args['weight_type'] = weight_type2[:-len('_thetacut')]
-            meas_args['cut'] = 'theta'
-        with_auw = weight_type.endswith('_auw')
-        if with_auw:
-            tracer_args['weight_type'] = weight_type[:-len('_auw')]
-            if tracer2 is not None:
-                tracer2_args['weight_type'] = weight_type2[:-len('_auw')]
-        
-        # get the filenames for the data and randoms
-        if region in ['SGC','NGC']:
-            data_kind, randoms_kind = 'data','randoms'
-        else:
-            # Not very useful, full clustering catalogs do not have FKP weights
-            # So I made it so kind='full_data_clus' returns both NGC and SGC files.
-            # Then the splitting is handled by get_clustering_positions_weights.
-            data_kind, randoms_kind = 'full_data_clus','full_randoms_clus'
-        data_fn = get_catalog_fn(kind=data_kind, **common_args, **tracer_args)
-        all_randoms_fn = get_catalog_fn(kind=randoms_kind, **common_args, **tracer_args)
-        if tracer2 is not None:
-            data_fn_2 = get_catalog_fn(kind=data_kind, **common_args, **tracer2_args)
-            all_randoms_fn_2 = get_catalog_fn(kind=randoms_kind, **common_args, **tracer2_args)
-        # bitwise option not implemented yet
-        # if 'bitwise' in tracer['weight_type']:
-        #     catalog_args['ntmp'] = compute_ntmp(get_catalog_fn(kind='full_data', **tracer_args))
-
-        # Load data and randoms
-        get_data = lambda: get_clustering_positions_weights(data_fn, kind='data', **common_args, **tracer_args)
-        get_randoms = lambda: get_clustering_positions_weights(*all_randoms_fn, kind='randoms', **common_args, **tracer_args)
-        if tracer2 is not None:
-            get_data_2 = lambda: get_clustering_positions_weights(data_fn_2, kind='data', **common_args, **tracer2_args)
-            get_randoms_2 = lambda: get_clustering_positions_weights(*all_randoms_fn_2, kind='randoms', **common_args, **tracer2_args)
-        else: 
-            get_data_2 = None
-            get_randoms_2 = None
-        # if using recon (not implemented yet)
-        get_shifted   = None
-        get_shifted_2 = None
-        
-        # Angular upweighting not implemented yet
-        # if 'auw' in todo:
-        #     full_data_fn = get_catalog_fn(kind='full_data', **catalog_args)
-        #     all_full_randoms_fn = get_catalog_fn(kind='full_randoms', **catalog_args)
-        #     get_full_data = lambda kind: get_full_rdw(full_data_fn, kind=kind, **catalog_args)
-        #     get_full_randoms = lambda kind: get_full_rdw(*all_full_randoms_fn, kind=kind, **catalog_args)
+                tracer2_args = dict(tracer=tracer2, weight_type=weight_type2)
     
-        #     output_fn = get_measurement_fn(**catalog_args, kind='angular_upweights')
-        #     with create_sharding_mesh() as sharding_mesh:
-        #         compute_angular_upweights(output_fn, get_full_data, get_full_randoms)
-    
-        # if with_auw:
-        #     jax.experimental.multihost_utils.sync_global_devices('auw')
-        #     meas_args['auw'] = types.read(get_measurement_fn(**catalog_args, kind='angular_upweights'))
-        
-        spectrum_args |= meas_args
-        
-        # Collect ouput fn arguments 
-        output_fn_args = dict(base_dir=out_dir, file_type='h5', region=region, tracer=tracer, tracer2=tracer2, 
-                              zmin=zrange[0], zmax=zrange[1], weight_type=weight_type, weight_type2=weight_type2, 
-                              nran=nran, P0=None, P02=None, ric_dir=None) | meas_args
-        
-        # Compute power spectrum with jax-power
-        if 'mesh2_spectrum' in todo:
-            output_fn = get_power_fn(**output_fn_args, boxsize=boxsize, cellsize=cellsize, kind='mesh2_spectrum_poles')
-            spectrum_args2 = dict(spectrum_args)
-            # if 'dr2' in version:
-            #     spectrum_args2.update(ells=[0], edges={'step': 0.02})
-            with create_sharding_mesh() as sharding_mesh:
-                compute_jaxpower_mesh2_spectrum(output_fn, get_data, get_randoms, get_data_2=get_data_2, get_randoms_2=get_randoms_2,
-                                                get_shifted=get_shifted, cache=cache, **spectrum_args2)
-                jax.clear_caches()
-        
-        # if 'mesh2_spectrum' in todo:
-        #     output_fn = get_measurement_fn(imock=imock, **catalog_args, kind='mesh2_spectrum_poles')
-        #     with create_sharding_mesh() as sharding_mesh:
-        #         compute_jaxpower_mesh2_spectrum(output_fn, get_data, get_randoms, get_shifted=get_shifted, cache=cache,**spectrum_args)
-        # Compute window matrix with jax-power
-        if 'window_mesh2_spectrum' in todo:
-            jax.experimental.multihost_utils.sync_global_devices("spectrum")
-            spectrum_fn = get_power_fn(**output_fn_args, boxsize=boxsize, cellsize=cellsize, kind='mesh2_spectrum_poles')
-            output_fn   = get_power_fn(**output_fn_args, boxsize=boxsize, cellsize=cellsize, kind='window_mesh2_spectrum_poles')
-            with create_sharding_mesh() as sharding_mesh:
-                compute_jaxpower_window_mesh2_spectrum(output_fn, get_randoms, get_data=get_data, spectrum_fn=spectrum_fn)
-                jax.clear_caches()
-                    
-        # if 'window_mesh2_spectrum' in todo:
-        #     output_fn = get_power_fn(**catalog_args, kind='window_mesh2_spectrum_poles')
-        #     with create_sharding_mesh() as sharding_mesh:
-        #         get_spectrum = lambda: compute_jaxpower_mesh2_spectrum(None, get_data, get_randoms, **spectrum_args)
-        #         compute_jaxpower_window_mesh2_spectrum(output_fn, get_randoms, get_data=get_data, get_spectrum=get_spectrum)
-        
-    if 'combine' in todo:
-        for kind in ['mesh2_spectrum_poles']:
-            kw = dict(kind=kind, **output_fn_args, boxsize=boxsize, cellsize=cellsize)
-            fns = [get_power_fn(**(kw | dict(region=region))) for region in regions]
-            if ('NGC' in regions) and ('SGC' in regions):
-                region_comb = 'GCcomb' 
-            elif ('N' in regions) and ('S' in regions):
-                region_comb = 'NS'
-            elif ('NGCnoN' in regions) and ('SGC' in regions):
-                region_comb = 'GCcomb_noNorth'
-            elif ('NGC' in regions) and ('SGCnoDES' in regions):
-                region_comb = 'GCcomb_noDES'
-            else: 
-                raise ValueError(f'Combining regions is not implemented for {regions}')
-            output_fn = get_power_fn(**(kw | dict(region=region_comb)))
-            print(fns,output_fn)
-            combine_regions(output_fn, fns, logger=logger)
+            # Collect spectrum arguments in a dictonary
+            spectrum_args = dict(boxsize=boxsize, cellsize=cellsize, ells=(0, 2, 4))
             
-    if with_jax: jax.distributed.shutdown()
+            # Collect other optional arguments in a dictionary and remove them from the 'weight_type' keys
+            meas_args = dict()
+            if weight_type.endswith('_thetacut'):
+                tracer_args['weight_type']  = weight_type[:-len('_thetacut')]
+                if tracer2 is not None:
+                    tracer2_args['weight_type'] = weight_type2[:-len('_thetacut')]
+                meas_args['cut'] = 'theta'
+            with_auw = weight_type.endswith('_auw')
+            if with_auw:
+                tracer_args['weight_type'] = weight_type[:-len('_auw')]
+                if tracer2 is not None:
+                    tracer2_args['weight_type'] = weight_type2[:-len('_auw')]
+            
+            # get the filenames for the data and randoms
+            if region in ['SGC','NGC']:
+                data_kind, randoms_kind = 'data','randoms'
+            else:
+                # Not very useful, full clustering catalogs do not have FKP weights
+                # So I made it so kind='full_data_clus' returns both NGC and SGC files.
+                # Then the splitting is handled by get_clustering_positions_weights.
+                data_kind, randoms_kind = 'full_data_clus','full_randoms_clus'
+            data_fn = get_catalog_fn(kind=data_kind, **common_args, **tracer_args)
+            all_randoms_fn = get_catalog_fn(kind=randoms_kind, **common_args, **tracer_args)
+            if tracer2 is not None:
+                data_fn_2 = get_catalog_fn(kind=data_kind, **common_args, **tracer2_args)
+                all_randoms_fn_2 = get_catalog_fn(kind=randoms_kind, **common_args, **tracer2_args)
+            # bitwise option not implemented yet
+            # if 'bitwise' in tracer['weight_type']:
+            #     catalog_args['ntmp'] = compute_ntmp(get_catalog_fn(kind='full_data', **tracer_args))
+    
+            # Load data and randoms
+            get_data = lambda: get_clustering_positions_weights(data_fn, kind='data', **common_args, **tracer_args)
+            get_randoms = lambda: get_clustering_positions_weights(*all_randoms_fn, kind='randoms', **common_args, **tracer_args)
+            if tracer2 is not None:
+                get_data_2 = lambda: get_clustering_positions_weights(data_fn_2, kind='data', **common_args, **tracer2_args)
+                get_randoms_2 = lambda: get_clustering_positions_weights(*all_randoms_fn_2, kind='randoms', **common_args, **tracer2_args)
+            else: 
+                get_data_2 = None
+                get_randoms_2 = None
+            # if using recon (not implemented yet)
+            get_shifted   = None
+            get_shifted_2 = None
+            
+            # Angular upweighting not implemented yet
+            # if 'auw' in todo:
+            #     full_data_fn = get_catalog_fn(kind='full_data', **catalog_args)
+            #     all_full_randoms_fn = get_catalog_fn(kind='full_randoms', **catalog_args)
+            #     get_full_data = lambda kind: get_full_rdw(full_data_fn, kind=kind, **catalog_args)
+            #     get_full_randoms = lambda kind: get_full_rdw(*all_full_randoms_fn, kind=kind, **catalog_args)
+        
+            #     output_fn = get_measurement_fn(**catalog_args, kind='angular_upweights')
+            #     with create_sharding_mesh() as sharding_mesh:
+            #         compute_angular_upweights(output_fn, get_full_data, get_full_randoms)
+        
+            # if with_auw:
+            #     jax.experimental.multihost_utils.sync_global_devices('auw')
+            #     meas_args['auw'] = types.read(get_measurement_fn(**catalog_args, kind='angular_upweights'))
+            
+            spectrum_args |= meas_args
+            
+            # Collect ouput fn arguments 
+            output_fn_args = dict(base_dir=out_dir, file_type='h5', region=region, tracer=tracer, tracer2=tracer2, 
+                                  zmin=i_zrange[0], zmax=i_zrange[1], weight_type=weight_type, weight_type2=weight_type2, 
+                                  nran=nran, P0=None, P02=None, ric_dir=None) | meas_args
+            
+            # Compute power spectrum with jax-power
+            if 'mesh2_spectrum' in todo:
+                t0 = time() # time start
+                output_fn = get_power_fn(**output_fn_args, boxsize=boxsize, cellsize=cellsize, kind='mesh2_spectrum_poles')
+                spectrum_args2 = dict(spectrum_args)
+                with create_sharding_mesh() as sharding_mesh:
+                    compute_jaxpower_mesh2_spectrum(output_fn, get_data, get_randoms, get_data_2=get_data_2, get_randoms_2=get_randoms_2,
+                                                    get_shifted=get_shifted, cache=cache, **spectrum_args2)
+                    jax.clear_caches()
+                if jax.process_index() == 0:
+                    with open(logfn, "a") as logf:
+                        logf.write(f"{str(datetime.now())} - {str(output_fn).split('/')[-1]} generated in {time()-t0:.2f} seconds\n")
+            
+            # Compute window matrix with jax-power
+            if 'window_mesh2_spectrum' in todo:
+                jax.experimental.multihost_utils.sync_global_devices("spectrum")
+                spectrum_fn = get_power_fn(**output_fn_args, boxsize=boxsize, cellsize=cellsize, kind='mesh2_spectrum_poles')
+                output_fn   = get_power_fn(**output_fn_args, boxsize=boxsize, cellsize=cellsize, kind='window_mesh2_spectrum_poles')
+                with create_sharding_mesh() as sharding_mesh:
+                    compute_jaxpower_window_mesh2_spectrum(output_fn, get_randoms, get_data=get_data, spectrum_fn=spectrum_fn)
+                    jax.clear_caches()
+                        
+        
+        if 'combine' in todo:
+            jax.experimental.multihost_utils.sync_global_devices("spectrum")
+            if jax.process_index() == 0:
+                t0 = time()
+                for kind in ['mesh2_spectrum_poles']:
+                    kw = dict(kind=kind, **output_fn_args, boxsize=boxsize, cellsize=cellsize)
+                    fns = [get_power_fn(**(kw | dict(region=region))) for region in regions]
+                    if ('NGC' in regions) and ('SGC' in regions):
+                        region_comb = 'GCcomb' 
+                    elif ('N' in regions) and ('S' in regions):
+                        region_comb = 'NS'
+                    elif ('NGCnoN' in regions) and ('SGC' in regions):
+                        region_comb = 'GCcomb_noNorth'
+                    elif ('NGC' in regions) and ('SGCnoDES' in regions):
+                        region_comb = 'GCcomb_noDES'
+                    else: 
+                        raise ValueError(f'Combining regions is not implemented for {regions}')
+                    output_fn = get_power_fn(**(kw | dict(region=region_comb)))
+                    print(fns,output_fn)
+                    combine_regions(output_fn, fns, logger=logger)
+                    with open(logfn, "a") as logf:
+                        logf.write(f"{str(datetime.now())} - {str(output_fn).split('/')[-1]} generated in {time()-t0:.2f} seconds from combining {str(fns[0]).split('/')[-1]} and {str(fns[1]).split('/')[-1]}\n")
+            
+    jax.distributed.shutdown()

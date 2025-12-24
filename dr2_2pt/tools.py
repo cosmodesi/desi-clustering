@@ -2,8 +2,9 @@ import os
 import numpy as np
 from pathlib import Path
 
-from mockfactory import Catalog, sky_to_cartesian
+from mockfactory import Catalog, setup_logging, sky_to_cartesian
 import lsstypes as types
+from astropy.table import Table
 
 def load_footprint():
     #global footprint
@@ -67,25 +68,52 @@ def get_proposal_mattrs(tracer):
     #mattrs.update(cellsize=30)
     return mattrs
 
+def read_hdf5_blosc(filename,columns=None,extname='LSS'):
+    '''
+    copied from https://github.com/desihub/LSS/blob/1f27fafe4bf85fbf2a3adecfa7d60b7eeff5988a/py/LSS/common_tools.py#L1745
+    read an extension from a hdf5 file that has been blosc compressed
+    filename is the full path to the file to read
+    columns is the list of columns to read; if None, all will be read
+    extname is the extension to read; if None, assumes no separate extensions
+    '''
+    # need to add log message when reading files
+    import h5py
+    import hdf5plugin #need to be in the cosmodesi test environment, as of Sep 4th 25
+    data = Table()
+    with h5py.File(filename) as fn:
+        if extname is None:
+            if columns is None:
+                columns = fn.keys()
+            for col in columns:
+                data[col] = fn[col][:]
+
+        else:
+            if columns is None:
+                columns = fn[extname].keys()
+            for col in columns:
+                data[col] = fn[extname][col][:]
+
+    return data
+    
 def get_catalog_dir(survey='Y1', verspec='iron', version='v1.2', base_dir='/global/cfs/cdirs/desi/survey/catalogs'):
     base_dir = Path(base_dir)
     return base_dir / survey / 'LSS' / verspec / 'LSScats' / version
 
-def get_catalog_fn(base_dir='/global/cfs/cdirs/desi/survey/catalogs', kind='data', tracer='LRG', weight_type='bitwise', zrange=(0.8, 1.1), region='NGC', nran=10, **kwargs):
+def get_catalog_fn(base_dir='/global/cfs/cdirs/desi/survey/catalogs', kind='data', tracer='LRG', weight_type='bitwise', zrange=(0.8, 1.1), region='NGC', nran=10, fmt='h5', **kwargs):
     # if 'bitwise' in weight_type: is not implemented yet 
     data_dir = Path(base_dir)
     if kind == 'data':
-        return data_dir / f'{tracer}_{region}_clustering.dat.fits'
+        return data_dir / f'{tracer}_{region}_clustering.dat.{fmt}'
     if kind == 'randoms':
-        return [data_dir / f'{tracer}_{region}_{iran:d}_clustering.ran.fits' for iran in range(nran)]
+        return [data_dir / f'{tracer}_{region}_{iran:d}_clustering.ran.{fmt}' for iran in range(nran)]
     if kind == 'full_data_clus':
-        return [data_dir / f'{tracer}_{region}_clustering.dat.fits' for region in ['NGC','SGC']]
+        return [data_dir / f'{tracer}_{region}_clustering.dat.{fmt}' for region in ['NGC','SGC']]
     if kind == 'full_randoms_clus':
-        return [data_dir / f'{tracer}_{region}_{iran:d}_clustering.ran.fits' for iran in range(nran) for region in ['NGC','SGC']]
+        return [data_dir / f'{tracer}_{region}_{iran:d}_clustering.ran.{fmt}' for iran in range(nran) for region in ['NGC','SGC']]
     if kind == 'full_data':
-        return data_dir / f'{tracer}_full_HPmapcut.dat.fits'
+        return data_dir / f'{tracer}_full_HPmapcut.dat.{fmt}'
     if kind == 'full_randoms':
-        return [data_dir / f'{tracer}_{iran:d}_full_HPmapcut.ran.fits' for iran in range(nran)]
+        return [data_dir / f'{tracer}_{iran:d}_full_HPmapcut.ran.{fmt}' for iran in range(nran)]
 
 
 def get_power_fn(base_dir=os.getenv('PSCRATCH'), kind='', file_type='h5', region='', tracer='ELG', tracer2=None, zmin=0, zmax=np.inf, weight_type='default',
@@ -100,28 +128,27 @@ def get_power_fn(base_dir=os.getenv('PSCRATCH'), kind='', file_type='h5', region
     if region: tracer += '_' + region
     # if recon_dir != 'n':
     #     out_dir = out_dir[:-2] + recon_dir+'/pk/'
-    
-    if cut: cut = '_thetacut'
-    else: cut = ''
-    if auw: auw = '_auw'
-    else: auw = ''
         
     if option:
         zmax = str(zmax) + option
 
-    root = '{}_z{}-{}_{}{}{}'.format(tracer, zmin, zmax, weight_type, auw, cut)
-    if isinstance(boxsize, list): 
-        root += '_box-{}_{}_{}'.format(boxsize[0],boxsize[1],boxsize[2])
-    else:
-        root += '_box-{}'.format(boxsize)
-    if cellsize is not None:
-        root += '_cell{}'.format(cellsize)
+    root = '{}_z{}-{}_{}'.format(tracer, zmin, zmax, weight_type)
     if nran is not None:
         root += '_nran{}'.format(nran)
+    if cellsize is not None:
+        root += '_cellsize{}'.format(cellsize)   
+    if isinstance(boxsize, list): 
+        root += '_boxsize{}_{}_{}'.format(int(boxsize[0]),int(boxsize[1]),int(boxsize[2]))
+    else:
+        root += '_boxsize{}'.format(int(boxsize))
     if P0 is not None:
         root += '_P0-{}'.format(P0)
     if P02 is not None:
         root += '_P02-{}'.format(P02)
+    if auw is not None:
+        root += '_auw'
+    if cut is not None:
+        root += '_thetacut'
     if ric_dir is not None:
         ric = 'noric' if 'noric' in ric_dir else 'ric'
         root += '_{}'.format(ric)
@@ -246,8 +273,14 @@ def get_clustering_rdzw(*fns, kind=None, zrange=None, region=None, tracer=None, 
         irank = ifn % mpicomm.size
         catalogs[ifn] = (irank, None)
         if mpicomm.rank == irank:  # Faster to read catalogs from one rank
-            catalog = Catalog.read(fn, mpicomm=MPI.COMM_SELF)
-            catalog.get(catalog.columns())  # Faster to read all columns at once
+            if 'fits' in str(fn):
+                catalog = Catalog.read(fn, mpicomm=MPI.COMM_SELF)
+                catalog.get(catalog.columns())  # Faster to read all columns at once
+            else:
+                import logging
+                logger = logging.getLogger('get_clustering_rdzw') 
+                logger.info(f'Reading {fn}')
+                catalog = Catalog(data=read_hdf5_blosc(fn), mpicomm=MPI.COMM_SELF)
             columns = ['RA', 'DEC', 'Z', 'WEIGHT', 'WEIGHT_SYS', 'WEIGHT_ZFAIL', 'WEIGHT_COMP', 'WEIGHT_FKP', 'BITWEIGHTS', 'FRAC_TLOBS_TILES', 'NTILE']
             columns = [col for col in columns if col in catalog.columns()]
             catalog = catalog[columns]
