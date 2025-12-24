@@ -4,7 +4,7 @@
 #SBATCH -N 1
 #SBATCH --gpus 4
 #SBATCH -t 0:20:00
-#SBATCH -q debug
+#SBATCH -q regular
 #SBATCH -J mocks_pks
 #SBATCH -L SCRATCH
 #SBATCH -o slurm_outputs/holi_mocks_pks/%A_mock%a.log
