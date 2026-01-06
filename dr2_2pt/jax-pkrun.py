@@ -44,8 +44,8 @@ def compute_jaxpower_mesh2_spectrum(output_fn, get_data, get_randoms, get_data_2
     else:  # no bitwise_weights
         data[1] = individual_weight = data[1][0]
         
-    data = ParticleField(*data, attrs=mattrs, exchange=True, backend='jax')
-    randoms = ParticleField(randoms[0], randoms[1][0], attrs=mattrs, exchange=True, backend='jax')
+    data = ParticleField(*data, attrs=mattrs, exchange=True, backend='mpi')
+    randoms = ParticleField(randoms[0], randoms[1][0], attrs=mattrs, exchange=True, backend='mpi')
     fkp = FKPField(data, randoms)
     if cache is None: cache = {}
     bin = cache.get('bin_mesh2_spectrum', None)
@@ -54,7 +54,7 @@ def compute_jaxpower_mesh2_spectrum(output_fn, get_data, get_randoms, get_data_2
     norm = compute_fkp2_normalization(fkp, bin=bin, cellsize=10)
     if get_shifted is not None:
         del fkp, randoms
-        randoms = ParticleField(*get_shifted(), attrs=mattrs, exchange=True, backend='jax')
+        randoms = ParticleField(*get_shifted(), attrs=mattrs, exchange=True, backend='mpi')
         fkp = FKPField(data, randoms)
     num_shotnoise = compute_fkp2_shotnoise(fkp, bin=bin)
     mesh = fkp.paint(resampler='tsc', interlacing=3, compensate=True, out='real')
@@ -90,13 +90,13 @@ def compute_jaxpower_window_mesh2_spectrum(output_fn, get_randoms, get_data=None
     ellsin = [0, 2, 4]
     output_fn = str(output_fn)
 
-    #randoms = ParticleField(*get_randoms(), attrs=mattrs, exchange=True, backend='jax')
+    #randoms = ParticleField(*get_randoms(), attrs=mattrs, exchange=True, backend='mpi')
     randoms = get_randoms()
-    randoms = ParticleField(randoms[0], randoms[1][0], attrs=mattrs, exchange=True, backend='jax')
+    randoms = ParticleField(randoms[0], randoms[1][0], attrs=mattrs, exchange=True, backend='mpi')
     zeff = compute_fkp_effective_redshift(randoms, order=2)
     #if get_data is not None:
     #    from jaxpower import FKPField
-    #    data = ParticleField(*get_data(), attrs=mattrs, exchange=True, backend='jax')
+    #    data = ParticleField(*get_data(), attrs=mattrs, exchange=True, backend='mpi')
     #    zeff = compute_fkp_effective_redshift(FKPField(data=data, randoms=randoms))
     randoms = spectrum.attrs['wsum_data1'] / randoms.sum() * randoms
 
@@ -113,7 +113,7 @@ def compute_jaxpower_window_mesh2_spectrum(output_fn, get_randoms, get_data=None
             mattrs2 = mattrs.clone(boxsize=scale * mattrs.boxsize) #, meshsize=800)
             kw_paint = dict(resampler='tsc', interlacing=3, compensate=True)
             meshes = []
-            for _ in split_particles(randoms.clone(attrs=mattrs2, exchange=True, backend='jax'), None, seed=42):
+            for _ in split_particles(randoms.clone(attrs=mattrs2, exchange=True, backend='mpi'), None, seed=42):
                 alpha = spectrum.attrs['wsum_data1'] / _.sum()
                 meshes.append(alpha * _.paint(**kw_paint, out='real'))
             sbin = BinMesh2CorrelationPoles(mattrs2, edges=np.arange(0., mattrs2.boxsize.min() / 2., mattrs2.cellsize.min()), **kw, basis='bessel') #, kcut=(0., mattrs2.knyq.min()))
