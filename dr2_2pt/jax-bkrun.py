@@ -14,6 +14,8 @@ import itertools
 from pathlib import Path
 
 import numpy as np
+from datetime import datetime
+from time import time
 
 from mockfactory import setup_logging
 import lsstypes as types
@@ -214,6 +216,16 @@ if __name__ == '__main__':
 
     # what to do?
     todo = args.todo
+
+    # file to log date and time a file was made 
+    # and how much time it took to generate it.
+    logfn = out_dir+'clustering_log.txt'
+    if jax.process_index() == 0:
+        if not os.path.exists(out_dir):
+            os.makedirs(out_dir)
+        if not os.path.isfile(logfn):
+            with open(logfn, "a") as logf:
+                logf.write("File to log date and time a file was made and how much time it took to generate it.\n")
     
     # iterate over redshift bins then regions
     for i_zrange in zrange:
@@ -269,10 +281,14 @@ if __name__ == '__main__':
                     jax.clear_caches() 
     
             if 'mesh3_spectrum_sugiyama' in todo:
+                t0 = time() # time start
                 bispectrum_args = spectrum_args | dict(basis='sugiyama-diagonal', ells=[(0, 0, 0), (2, 0, 2)])
                 output_fn = get_power_fn(**output_fn_args, boxsize=boxsize, cellsize=cellsize, kind=f'mesh3_spectrum_poles_{bispectrum_args["basis"]}')
                 with create_sharding_mesh() as sharding_mesh:
                     compute_jaxpower_mesh3_spectrum(output_fn, get_data, get_randoms, get_shifted=get_shifted, cache=cache, **bispectrum_args)
+                if jax.process_index() == 0:
+                    with open(logfn, "a") as logf:
+                        logf.write(f"{str(datetime.now())} - {str(output_fn).split('/')[-1]} generated in {time()-t0:.2f} seconds\n")
     
             if 'window_mesh3_spectrum_sugiyama' in todo and iimock == 1:
                 jax.experimental.multihost_utils.sync_global_devices("spectrum")
@@ -281,5 +297,28 @@ if __name__ == '__main__':
                 with create_sharding_mesh() as sharding_mesh:
                     compute_jaxpower_window_mesh3_spectrum(output_fn, get_randoms, spectrum_fn=spectrum_fn)
                     jax.clear_caches()
+                    
+        if 'combine' in todo:
+            jax.experimental.multihost_utils.sync_global_devices("spectrum")
+            if jax.process_index() == 0:
+                t0 = time()
+                for kind in [f'mesh3_spectrum_poles_{bispectrum_args["basis"]}']:
+                    kw = dict(kind=kind, **output_fn_args, boxsize=boxsize, cellsize=cellsize)
+                    fns = [get_power_fn(**(kw | dict(region=region))) for region in regions]
+                    if ('NGC' in regions) and ('SGC' in regions):
+                        region_comb = 'GCcomb' 
+                    elif ('N' in regions) and ('S' in regions):
+                        region_comb = 'NS'
+                    elif ('NGCnoN' in regions) and ('SGC' in regions):
+                        region_comb = 'GCcomb_noNorth'
+                    elif ('NGC' in regions) and ('SGCnoDES' in regions):
+                        region_comb = 'GCcomb_noDES'
+                    else: 
+                        raise ValueError(f'Combining regions is not implemented for {regions}')
+                    output_fn = get_power_fn(**(kw | dict(region=region_comb)))
+                    print(fns,output_fn)
+                    combine_regions(output_fn, fns, logger=logger)
+                    with open(logfn, "a") as logf:
+                        logf.write(f"{str(datetime.now())} - {str(output_fn).split('/')[-1]} generated in {time()-t0:.2f} seconds from combining {str(fns[0]).split('/')[-1]} and {str(fns[1]).split('/')[-1]}\n")
                 
     jax.distributed.shutdown()
