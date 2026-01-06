@@ -72,7 +72,7 @@ def compute_jaxpower_mesh2_spectrum(output_fn, get_data, get_randoms, get_data_2
     jax.block_until_ready(spectrum)
     #logger.info(f'Elapsed time: {time.time() - t0:.2f}.')
     #del spectrum, bin
-    return spectrum, bin
+    return spectrum
 
 
 def compute_jaxpower_window_mesh2_spectrum(output_fn, get_randoms, get_data=None, spectrum_fn=None, kind='smooth', **kwargs):
@@ -113,12 +113,11 @@ def compute_jaxpower_window_mesh2_spectrum(output_fn, get_randoms, get_data=None
             mattrs2 = mattrs.clone(boxsize=scale * mattrs.boxsize) #, meshsize=800)
             kw_paint = dict(resampler='tsc', interlacing=3, compensate=True)
             meshes = []
-            for _ in split_particles(randoms.clone(attrs=mattrs2, exchange=True, backend='mpi'), None, seed=42):
+            for _ in split_particles(randoms.clone(attrs=mattrs2, exchange=True, backend='jax'), None, seed=42):
                 alpha = spectrum.attrs['wsum_data1'] / _.sum()
                 meshes.append(alpha * _.paint(**kw_paint, out='real'))
-            sbin = BinMesh2CorrelationPoles(mattrs2, edges=np.arange(0., mattrs2.boxsize.min() / 2., mattrs2.cellsize.min()), **kw, basis='bessel') #, kcut=(0., mattrs2.knyq.min()))
-            #num_shotnoise = compute_fkp2_shotnoise(randoms, bin=sbin)
-            correlation = compute_mesh2_correlation(*meshes, bin=sbin, los=los).clone(norm=[norm] * len(sbin.ells)) #, num_shotnoise=num_shotnoise)
+            sbin = BinMesh2CorrelationPoles(mattrs2, edges=np.arange(0., mattrs2.boxsize.min() / 2., mattrs2.cellsize.min()), **kw, basis='bessel') 
+            correlation = compute_mesh2_correlation(*meshes, bin=sbin, los=los).clone(norm=[norm] * len(sbin.ells))
             del meshes
             correlation_fn = output_fn.replace('window_mesh2_spectrum', f'window_correlation{scale:d}_bessel_mesh2_spectrum')
             if jax.process_index() == 0:
@@ -142,7 +141,6 @@ def compute_jaxpower_window_mesh2_spectrum(output_fn, get_randoms, get_data=None
             alpha = spectrum.attrs['wsum_data1'] / _.sum()
             meshes.append(alpha * _.paint(**kw_paint, out='real'))
         window = compute_mesh2_spectrum_window(*meshes, edgesin=edgesin, ellsin=ellsin, los=los, bin=bin, pbar=True, flags=('infinite',), norm=norm)
-        #window = compute_mesh2_spectrum_window(mesh, edgesin=edgesin[:3], ellsin=ellsin, los=los, bin=bin, pbar=True, flags=[], norm=norm)
     window = window.clone(observable=window.observable.map(lambda pole: pole.clone(norm=norm * np.ones_like(pole.values('norm')))))
     for pole in window.theory: pole._meta['z'] = zeff
     if output_fn is not None and jax.process_index() == 0:
