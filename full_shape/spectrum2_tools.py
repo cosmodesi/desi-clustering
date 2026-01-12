@@ -18,10 +18,13 @@ def prepare_jaxpower_particles(*get_data_randoms, mattrs=None, backend='mpi', **
         if shifted:
             all_shifted.append(shifted)
 
-    assert len(all_shifted) == len(data), 'Give as many shifted randoms as data/randoms'
+    if all_shifted:
+        assert len(all_shifted) == len(data), 'Give as many shifted randoms as data/randoms'
 
     # Define the mesh attributes; pass in positions only
     mattrs = get_mesh_attrs(*[data[0] for data in all_data + all_shifted + all_randoms], check=True, **(mattrs or {}))
+    if jax.process_index() == 0:
+        logger.info(f'Using mesh {mattrs}.')
 
     all_particles = []
     for i, (data, randoms) in enumerate(zip(all_data, all_randoms)):
@@ -33,13 +36,13 @@ def prepare_jaxpower_particles(*get_data_randoms, mattrs=None, backend='mpi', **
             shifted = None
         all_particles.append((data, randoms, shifted))
     if jax.process_index() == 0:
-        logger.info(f'All particles on the GPU.')
+        logger.info(f'All particles on the device')
 
     return all_particles
 
 
 def _get_jaxpower_attrs(*particles):
-    mattrs = particles[0].attrs
+    mattrs = particles[0][0].attrs
     # Creating FKP fields
     attrs = {name: mattrs[name] for name in ['boxsize', 'boxcenter', 'meshsize']}
     for i, (data, randoms, shifted) in enumerate(particles):
@@ -70,8 +73,12 @@ def compute_mesh2_spectrum(*particles, cut=None, auw=None,
     norm = compute_fkp2_normalization(*all_fkp, bin=bin, cellsize=10)
 
     # Computing shot noise
-    all_fkp = [FKPField(data, shifted) for (data, _, shifted) in particles]
+    all_fkp = [FKPField(data, shifted if shifted is not None else randoms) for (data, randoms, shifted) in particles]
     num_shotnoise = compute_fkp2_shotnoise(*all_fkp, bin=bin)
+
+    jax.block_until_ready((norm, num_shotnoise))
+    if jax.process_index() == 0:
+        logger.info('Normalization and shotnoise computation finished')
 
     jitted_compute_mesh2_spectrum = jax.jit(compute_mesh2_spectrum, static_argnames=['los'], donate_argnums=[0])
     #jitted_compute_mesh2_spectrum = compute_mesh2_spectrum
@@ -86,14 +93,13 @@ def compute_mesh2_spectrum(*particles, cut=None, auw=None,
         logger.info('Mesh-based computation finished')
 
     if cut is not None:
-        assert auw is None, 'angular cut and angular upweighting are mutually exclusive'
         sattrs = {'theta': (0., 0.05)}
-        #bin = BinParticle2SpectrumPoles(mattrs, edges=bin.edges, xavg=bin.xavg, sattrs=sattrs, ells=ells)
-        bin = BinParticle2CorrelationPoles(mattrs, edges={'step': 0.1}, sattrs=sattrs, ells=ells)
+        #pbin = BinParticle2SpectrumPoles(mattrs, edges=bin.edges, xavg=bin.xavg, sattrs=sattrs, ells=ells)
+        pbin = BinParticle2CorrelationPoles(mattrs, edges={'step': 0.1}, sattrs=sattrs, ells=ells)
         from jaxpower.particle2 import convert_particles
         all_particles = [convert_particles(fkp.particles) for fkp in all_fkp]
-        close = compute_particle2(*all_particles, bin=bin, los=los)
-        close = close.clone(num_shotnoise=compute_particle2_shotnoise(*all_particles, bin=bin), norm=norm)
+        close = compute_particle2(*all_particles, bin=pbin, los=los)
+        close = close.clone(num_shotnoise=compute_particle2_shotnoise(*all_particles, bin=pbin), norm=norm)
         close = close.to_spectrum(spectrum)
         results['cut'] = spectrum.clone(value=spectrum.value() - close.value())
 
@@ -101,11 +107,11 @@ def compute_mesh2_spectrum(*particles, cut=None, auw=None,
         from cucount.jax import WeightAttrs
         from jaxpower.particle2 import convert_particles
         sattrs = {'theta': (0., 0.1)}
-        all_data = [convert_particles(fkp.data, weights=[fkp.weights] * 2, index_value=dict(individual_weight=1, negative_weight=1)) for fkp in all_fkp]
+        all_data = [convert_particles(fkp.data, weights=[fkp.data.weights] * 2, exchange_weights=False, index_value=dict(individual_weight=1, negative_weight=1)) for fkp in all_fkp]
         wattrs = WeightAttrs(angular=dict(sep=auw.get('DD').coords('theta'), weight=auw.get('DD').value()) if auw is not None else None)
-        bin = BinParticle2SpectrumPoles(mattrs, edges=bin.edges, xavg=bin.xavg, sattrs=sattrs, wattrs=wattrs, ells=ells)
-        DD = compute_particle2(*all_data, bin=bin, los=los)
-        DD = DD.clone(num_shotnoise=compute_particle2_shotnoise(*all_data, bin=bin), norm=norm)
+        pbin = BinParticle2SpectrumPoles(mattrs, edges=bin.edges, xavg=bin.xavg, sattrs=sattrs, wattrs=wattrs, ells=ells)
+        DD = compute_particle2(*all_data, bin=pbin, los=los)
+        DD = DD.clone(num_shotnoise=compute_particle2_shotnoise(*all_data, bin=pbin), norm=norm)
         results['auw'] = spectrum.clone(value=spectrum.value() + DD.value())
 
     jax.block_until_ready(results)

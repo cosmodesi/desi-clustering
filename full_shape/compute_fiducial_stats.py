@@ -17,12 +17,11 @@ logger = logging.getLogger('summary-statistics')
 
 
 def _fill_fiducial_options(**kwargs):
-    catalog_args = dict(catalog_args)
     options = {key: dict(value) for key, value in kwargs.items()}
-    tracer = catalog_args['tracer']
+    tracer = options['catalog']['tracer']
     tracers = tuple(tracer) if not isinstance(tracer, str) else (tracer,)
-    catalog_args['tracer'] = tracers
-    if catalog_args.get('nran', None): catalog_args['nran'] = tools.propose_fiducial('nran', tools.join_tracers(tracers))
+    options['catalog']['tracer'] = tracers
+    if options['catalog'].get('nran', None) is None: options['catalog']['nran'] = tools.propose_fiducial('nran', tools.join_tracers(tracers))
     # Mesh attributes
     options['mattrs'] = tools.propose_fiducial('mattrs', tools.join_tracers(tracers)) | options.get('mattrs', {})
     recon_args = options.pop('recon', {})
@@ -68,24 +67,23 @@ def compute_fiducial_stats_from_options(stats, cache=None,
     cache = cache or {}
     kwargs = _fill_fiducial_options(**kwargs)
     catalog_args = kwargs['catalog']
-    tracers = catalog_args['tracers']
+    tracers = catalog_args['tracer']
 
     with_recon = any('recon' in stat for stat in stats)
 
     data_positions_weights, randoms_positions_weights, local_sizes_randoms = {}, {}, {}
     for tracer in tracers:
         clustering_data_fn = get_catalog_fn(kind='data', **(catalog_args | dict(tracer=tracer)))
-        data_positions_weights[tracer] = tools.get_positions_weights_from_rdzw(read_clustering_rdzw(clustering_data_fn, **catalog_args, concatenate=False))
+        data_positions_weights[tracer] = tools.get_positions_weights_from_rdzw(read_clustering_rdzw(clustering_data_fn, **catalog_args, concatenate=True))
 
         all_clustering_randoms_fn = get_catalog_fn(kind='randoms', **(catalog_args | dict(tracer=tracer)))
         nran = catalog_args['nran']
-        if with_recon: nran = min(nran * 2, 18)
+        if with_recon: nran = min(nran * 2, 18)  # twice more randoms for reconstruction
         randoms_positions_weights[tracer] = tools.get_positions_weights_from_rdzw(read_clustering_rdzw(*all_clustering_randoms_fn, **(catalog_args | dict(nran=nran)), concatenate=False))
         local_sizes_randoms[tracer] = [len(pw[0]) for pw in randoms_positions_weights[tracer]]
         randoms_positions_weights[tracer] = [np.concatenate([pw[i] for pw in randoms_positions_weights[tracer]], axis=0) for i in range(2)]
 
     from jaxpower import create_sharding_mesh
-
     with create_sharding_mesh() as sharding_mesh:
         if with_recon:
             data_positions_weights_rec, randoms_positions_weights_rec = {}, {}
@@ -106,9 +104,10 @@ def compute_fiducial_stats_from_options(stats, cache=None,
         if any(kw.get('auw', False) for kw in kwargs.values()):
 
             def get_data(tracer):
-                catalog_args['wntile'] = tools.compute_wntile(get_catalog_fn(kind='data', **(catalog_args | dict(tracer=tracer, region='ALL'))))
-                full_data_fn = get_catalog_fn(kind='full_data', **catalog_args)
-                return read_full_rdw(full_data_fn, kind='fibered', **catalog_args), read_full_rdw(full_data_fn, kind='parent', **catalog_args)
+                _catalog_args = (catalog_args | dict(tracer=tracer, region='ALL'))
+                _catalog_args['wntile'] = tools.compute_wntile(get_catalog_fn(kind='data', **_catalog_args))
+                full_data_fn = get_catalog_fn(kind='full_data', **_catalog_args)
+                return read_full_rdw(full_data_fn, kind='fibered', **_catalog_args), read_full_rdw(full_data_fn, kind='parent', **_catalog_args)
 
             auw = compute_angular_upweights(*[functools.partial(get_data, tracer) for tracer in tracers])
             fn = get_measurement_fn(kind='angular_upweights', **catalog_args)
@@ -149,7 +148,6 @@ def compute_fiducial_stats_from_options(stats, cache=None,
                     return (data_positions_weights[tracer], randoms_positions_weights[tracer])
 
                 jaxpower_particles = prepare_jaxpower_particles(*[functools.partial(get_data, tracer) for tracer in tracers], mattrs=mattrs)
-
             for stat, func in funcs.items():
                 if stat in stats:
                     spectrum_args = kwargs[stat]
@@ -157,7 +155,7 @@ def compute_fiducial_stats_from_options(stats, cache=None,
                     if not isinstance(spectrum, dict): spectrum = {'raw': spectrum}
                     for key, kw in _expand_cut_auw_options(stat, spectrum_args).items():
                         fn = get_measurement_fn(kind=stat, **catalog_args, **kw)
-                        tools.write_summary_statistics(fn, stat)
+                        tools.write_summary_statistics(fn, spectrum[key])
 
         del jaxpower_particles
 
@@ -177,7 +175,6 @@ def combine_fiducial_stats_from_options(stats, region_comb, regions, get_measure
             tools.write_summary_statistics(fn, combined)
 
 
-
 def main(**kwargs):
     """This is an example main. You should write your own if you need anything fancier."""
     import argparse
@@ -194,14 +191,19 @@ def main(**kwargs):
     parser.add_argument('--cellsize', help='cell size', type=float, default=None)
     parser.add_argument('--nran', help='number of random files to combine together (1-18 available)', type=int, default=None)
     parser.add_argument('--meas_dir',  help='base directory for measurements, default is SCRATCH', type=str, default=Path(os.getenv('SCRATCH')) / 'measurements')
+    parser.add_argument('--meas_extra',  help='extra string to include in measurement filename', type=str, default='')
     parser.add_argument('--combine', help='combine measurements in two regions', action='store_true')
 
     args = parser.parse_args()
+    if args.stats:
+        os.environ['XLA_PYTHON_CLIENT_MEM_FRACTION'] = '0.9'
+        import jax
+        jax.distributed.initialize()
     tracer = args.tracer
     if args.zrange is None:
         zranges = tools.propose_fiducial('zranges', tracer)
     else:
-        assert len(args.zrange) % 2
+        assert len(args.zrange) % 2 == 0
         zranges = list(zip(args.zrange[::2], args.zrange[1::2]))
     mattrs = {key: value for key, value in dict(boxsize=args.boxsize, cellsize=args.cellsize).items() if key is not None}
     kwargs = {'mattrs': mattrs} | {'mesh2_spectrum': {}} | kwargs
@@ -212,20 +214,23 @@ def main(**kwargs):
     elif weight_type.endswith('_thetacut'):
         for stat in kwargs: kwargs[stat].update(cut=True)
         weight_type = weight_type[:-len('_thetacut')]
-    kwargs = _fill_fiducial_options(**kwargs)
-    get_measurement_fn = functools.partial(tools.get_measurement_fn, meas_dir=args.meas_dir)
+    get_measurement_fn = functools.partial(tools.get_measurement_fn, meas_dir=args.meas_dir, extra=args.meas_extra)
     cache = {}
     for zrange in zranges:
         for imock in args.imock:
             catalog_args = dict(version=args.version, cat_dir=args.cat_dir, tracer=args.tracer, zrange=zrange, weight_type=weight_type, nran=args.nran, imock=imock)
+            kwargs = _fill_fiducial_options(catalog=catalog_args, **kwargs)
             for region in args.region:
+                _kwargs = dict(kwargs)
+                _kwargs['catalog'] = _kwargs['catalog'] | dict(region=region)
                 compute_fiducial_stats_from_options(args.stats,
                                                                  get_measurement_fn=get_measurement_fn,
-                                                                 cache=cache, catalog=catalog_args | dict(region=region), **kwargs)
-        if args.combine:
-            for region_comb, regions in tools.possible_combine_regions(args.region):
-                combine_fiducial_stats_from_options(args.stats, region_comb, regions, catalog=catalog_args, **kwargs)
-
+                                                                 cache=cache, **_kwargs)
+            if args.combine:
+                for region_comb, regions in tools.possible_combine_regions(args.region).items():
+                    combine_fiducial_stats_from_options(args.stats, region_comb, regions, get_measurement_fn=get_measurement_fn, **kwargs)
+    if args.stats:
+        jax.distributed.shutdown()
 
 if __name__ == '__main__':
 

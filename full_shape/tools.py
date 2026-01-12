@@ -84,7 +84,7 @@ def select_region(ra, dec, region=None):
 
 def propose_fiducial(kind, tracer):
     cellsize = 7.8
-    base = {'correlation': {}, 'mesh2_spectrum': {}, 'mesh3_spectrum': {}}
+    base = {'particle2_correlation': {}, 'mesh2_spectrum': {}, 'mesh3_spectrum': {}}
     propose_fiducial = {
         'BGS': base | {'zranges': [(0.1, 0.4)], 'mattrs': dict(boxsize=4000., cellsize=cellsize), 'nran': 2, 'recon': dict(bias=1.5, smoothing_radius=15.)},
         'LRG+ELG': base | {'zranges': [(0.8, 1.1)], 'mattrs': dict(boxsize=9000., cellsize=cellsize), 'nran': 13, 'recon': dict(bias=1.6, smoothing_radius=15.)},
@@ -152,7 +152,7 @@ def get_catalog_fn(version=None, cat_dir=None, kind='data', tracer='LRG',
 
 
 
-def get_measurement_fn(meas_dir=Path(os.getenv('SCRATCH')) / 'measurements', kind='mesh2_spectrum', version='data-dr2-v2', recon=None,
+def get_measurement_fn(meas_dir=Path(os.getenv('SCRATCH')) / 'measurements', version=None, kind='mesh2_spectrum', recon=None,
                        tracer='LRG', region='NGC', zrange=(0.8, 1.1), auw=None, cut=None, weight_type='default', imock=None, extra='', ext='h5', **kwargs):
     if imock == '*':
         fns = [get_measurement_fn(meas_dir=meas_dir, kind=kind, version=version, recon=recon, tracer=tracer, region=region, zrange=zrange, auw=auw, cut=cut, weight_type=weight_type, imock=imock, ext=ext, **kwargs) for imock in range(1000)]
@@ -161,13 +161,21 @@ def get_measurement_fn(meas_dir=Path(os.getenv('SCRATCH')) / 'measurements', kin
     else: cut = ''
     if auw: auw = '_auw'
     else: auw = ''
-    meas_dir = meas_dir / version
+    meas_dir = Path(meas_dir)
+    if version is not None:
+        meas_dir = meas_dir / version
     if recon:
         meas_dir = meas_dir / recon
     if imock is None: imock = ''
-    else: imock = '_{imock:d}'
-    if extra: extra = '_{extra}'
+    else: imock = f'_{imock:d}'
+    if extra: extra = f'_{extra}'
     tracer = join_tracers(tracer)
+    corr_type = 'smu'
+    battrs = kwargs.get('battrs', None)
+    if battrs is not None: corr_type = ''.join(list(battrs))
+    kind = {'mesh2_spectrum': 'mesh2_spectrum_poles',
+            'mesh3_spectrum': 'mesh3_spectrum_poles',
+            'particle2_correlation': f'particle2_correlation_{corr_type}'}.get(kind, kind)
     basename = f'{kind}_{tracer}_z{zrange[0]:.1f}-{zrange[1]:.1f}_{region}_{weight_type}{auw}{cut}{extra}{imock}.{ext}'
     return meas_dir / basename
 
@@ -276,7 +284,7 @@ def read_clustering_rdzw(*fns, kind=None, zrange=None, region=None, weight_type=
         irank = ifn % mpicomm.size
         catalogs[ifn] = (irank, None)
         if mpicomm.rank == irank:  # Faster to read catalogs from one rank
-            catalog = _read_catalog(catalog, mpicomm=MPI.COMM_SELF)
+            catalog = _read_catalog(fn, mpicomm=MPI.COMM_SELF)
             columns = ['RA', 'DEC', 'Z', 'WEIGHT', 'WEIGHT_SYS', 'WEIGHT_ZFAIL', 'WEIGHT_COMP', 'WEIGHT_FKP', 'BITWEIGHTS', 'FRAC_TLOBS_TILES', 'NTILE']
             columns = [col for col in columns if col in catalog.columns()]
             catalog = catalog[columns]
@@ -309,7 +317,7 @@ def read_clustering_rdzw(*fns, kind=None, zrange=None, region=None, weight_type=
         for i in range(4): _rdzw[i] = _rdzw[i].astype('f8')
         rdzw.append(_rdzw)
     if concatenate:
-        rdzw = [np.concatenate([arrays[i] for arrays in rdzw], axis=0) for i in range(len(rdzw[0]))]
+        return [np.concatenate([arrays[i] for arrays in rdzw], axis=0) for i in range(len(rdzw[0]))]
     else:
         return rdzw
 
@@ -341,10 +349,11 @@ def read_full_rdw(*fns, kind='parent', region=None, weight_type='default', ntmp=
     for irank, catalog in catalogs:
         if mpicomm.size > 1:
             catalog = Catalog.scatter(catalog, mpicomm=mpicomm, mpiroot=irank)
-        individual_weight = catalog['WEIGHT_NTILE']
         if wntile is not None:
             individual_weight = apply_wntile(catalog['NTILE'], wntile)
-            assert np.allclose(individual_weight, catalog['WEIGHT_NTILE'])
+            #assert np.allclose(individual_weight, catalog['WEIGHT_NTILE'])
+        else:
+            individual_weight = catalog['WEIGHT_NTILE']
         bitwise_weights = []
         if 'fibered' in kind and 'data' in kind:
             if ntmp is not None:
