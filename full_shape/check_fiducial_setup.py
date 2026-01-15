@@ -14,7 +14,7 @@ from tools import setup_logging
 from compute_fiducial_stats import compute_fiducial_stats_from_options
 
 
-def check_boxsize(stats=['mesh2_spectrum']):
+def check_boxsize_spectrum(stats=['mesh2_spectrum']):
     meas_dir = Path(Path(os.getenv('SCRATCH')) / 'clustering-measurements-checks')
     boxsizes = {'LRG': [5000., 6000., 7000., 8000., 9000., 10000.],
                 'ELG_LOP': [6000., 7000., 8000., 9000., 10000.],
@@ -30,7 +30,7 @@ def check_boxsize(stats=['mesh2_spectrum']):
                                                         get_measurement_fn=functools.partial(tools.get_measurement_fn, meas_dir=meas_dir, extra=extra), mesh2_spectrum={'cut': True, 'auw': True})
 
 
-def check_nran(stats=['mesh2_spectrum']):
+def check_nran_spectrum(stats=['mesh2_spectrum']):
     meas_dir = Path(Path(os.getenv('SCRATCH')) / 'clustering-measurements-checks')
     nrans = {'LRG': [8, 9, 11, 18],
              'ELG_LOP': [11, 13, 16, 18],
@@ -50,6 +50,6 @@ if __name__ == '__main__':
     os.environ['XLA_PYTHON_CLIENT_MEM_FRACTION'] = '0.9'
     jax.distributed.initialize()
     setup_logging()
-    check_boxsize(stats=['mesh3_spectrum'])
-    #check_nran(stats=['mesh2_spectrum', 'mesh3_spectrum'])
+    check_boxsize_spectrum(stats=['mesh3_spectrum'])
+    #check_nran_spectrum(stats=['mesh2_spectrum', 'mesh3_spectrum'])
     jax.distributed.shutdown()

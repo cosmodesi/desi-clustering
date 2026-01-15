@@ -1,3 +1,11 @@
+"""
+source /global/common/software/desi/users/adematti/cosmodesi_environment.sh main
+python desipipe_holi_mocks.py  # create the list of tasks
+desipipe tasks -q holi_mocks  # check the list of tasks
+desipipe spawn -q holi_mocks --spawn  # spawn the jobs
+desipipe queues -q holi_mocks  # check the queue
+"""
+
 import numpy as np
 
 from desipipe import Queue, Environment, TaskManager, spawn, setup_logging
@@ -12,7 +20,7 @@ kwargs = {}
 environ = Environment('nersc-cosmodesi') #, command='module swap pyrecon/main pyrecon/mpi')
 #environ = Environment('nersc-cosmodesi')
 tm = TaskManager(queue=queue, environ=environ)
-tm = tm.clone(scheduler=dict(max_workers=10), provider=dict(provider='nersc', time='00:10:00',
+tm = tm.clone(scheduler=dict(max_workers=1), provider=dict(provider='nersc', time='00:10:00',
                             mpiprocs_per_worker=4, output=output, error=error, constraint='gpu'))
 
 
@@ -25,6 +33,7 @@ def run_stats(tracer='LRG', imocks=[451], stats=['mesh2_spectrum']):
     import jax
     sys.path.insert(0, '../')
     import tools
+    from tools import setup_logging
     from compute_fiducial_stats import compute_fiducial_stats_from_options, fill_fiducial_options
     os.environ['XLA_PYTHON_CLIENT_MEM_FRACTION'] = '0.9'
     jax.distributed.initialize()
@@ -36,12 +45,16 @@ def run_stats(tracer='LRG', imocks=[451], stats=['mesh2_spectrum']):
             for region in ['NGC', 'SGC']:
                 options = dict(catalog=dict(version='holi-v1-altmtl', tracer=tracer, zrange=zrange, region=region, imock=imock), mesh2_spectrum={'cut': True, 'auw': True})
                 options = fill_fiducial_options(**options)
-                compute_fiducial_stats_from_options(stats, get_measurement_fn=functools.partial(tools.get_measurement_fn, meas_dir=meas_dir), **options)
+                compute_fiducial_stats_from_options(stats, get_measurement_fn=functools.partial(tools.get_measurement_fn, meas_dir=meas_dir), cache=cache, **options)
     jax.distributed.shutdown()
+
 
 
 if __name__ == '__main__':
 
-    imocks = 451 + np.arange(5)
+    imocks = 451 + np.arange(250)
+    batch_imocks = np.array_split(imocks, len(imocks) // 10)
+
     for tracer in ['LRG', 'ELG_LOP', 'QSO'][:1]:
-        run_stats(imocks=imocks)
+        for imocks in batch_imocks[:4]:
+            run_stats(imocks=imocks, stats=['mesh2_spectrum', 'mesh3_spectrum'])
