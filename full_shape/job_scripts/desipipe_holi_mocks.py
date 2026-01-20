@@ -22,7 +22,7 @@ import tools
 
 setup_logging()
 
-queue = Queue('holi_mocks2')
+queue = Queue('holi_mocks')
 queue.clear(kill=False)
 
 output, error = 'slurm_outputs/holi_mocks/slurm-%j.out', 'slurm_outputs/holi_mocks/slurm-%j.err'

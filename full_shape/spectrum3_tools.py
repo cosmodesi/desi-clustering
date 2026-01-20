@@ -1,5 +1,6 @@
 import logging
 
+import numpy as np
 import jax
 
 from spectrum2_tools import prepare_jaxpower_particles, _get_jaxpower_attrs
