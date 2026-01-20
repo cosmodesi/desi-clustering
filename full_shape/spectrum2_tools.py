@@ -66,10 +66,16 @@ def prepare_jaxpower_particles(*get_data_randoms, mattrs=None, add_data=tuple(),
             iip = BitwiseWeight(weights=bitweights, p_correction_nbits=False)(bitweights)
             _add_data['BITWEIGHT'] = [indweights] + bitweights  # add individual weight (photometric, spectro systematics) without PIP
             indweights = indweights * iip  # multiply by IIP to correct fiber assignment at large scales
+        for column in add_data:
+            if column != 'BITWEIGHT':
+                _add_data[column] = data[column]
         data = ParticleField(data['POSITION'], indweights, attrs=mattrs, exchange=True, backend=backend, **kwargs)
         #ids = collective_arange(len(randoms['POSITION']))
         if 'TARGETID' in randoms and 'IDS' in add_randoms:
             _add_randoms['IDS'] = randoms['TARGETID']
+        for column in add_randoms:
+            if column != 'IDS':
+                _add_randoms[column] = randoms[column]
         randoms = ParticleField(randoms['POSITION'], randoms['INDWEIGHT'], attrs=mattrs, exchange=True, backend=backend, **kwargs)
         if backend == 'jax':  # first convert to JAX Array
             sharding_mesh = mattrs.sharding_mesh
@@ -255,41 +261,42 @@ def compute_mesh2_spectrum(*get_data_randoms, mattrs=None, cut=None, auw=None,
         return results
 
     if optimal_weights is None:
-        results = _compute_spectrum(*all_particles, ells=ells)
+        results = _compute_spectrum(all_particles, ells=ells)
     else:
         results = {}
         for ell in ells:
-            logger.info(f'Applying optimal weights for ell {ell}')
+            if jax.process_index() == 0:
+                logger.info(f'Applying optimal weights for ell {ell}')
 
             ifields = tuple(range(len(all_particles)))
             ifields = ifields + (ifields[-1],) * (2 - len(ifields))
-            all_particles = all_particles + (all_particles[-1],) * (2 - len(all_particles))
+            all_particles = tuple(all_particles) + (all_particles[-1],) * (2 - len(all_particles))
 
             def _get_optimal_weights(all_data):
-                if all_data is None: # shifted, yield None
+                # all_data is [data1, data2] or [randoms1, randoms2] or [shifted1, shifted2]
+                if all_data[0] is None:  # shifted is None, yield None
                     while True:
-                        yield None
+                        yield tuple(None for data in all_data)
                 for all_weights in optimal_weights(ell, [{'INDWEIGHT': data.weights} | {column: data.__dict__[column] for column in columns_optimal_weights} for data in all_data]):
                     yield tuple(data.clone(weights=weights) for data, weights in zip(all_data, all_weights))
 
             result_ell = {}
-            for all_data, all_randoms, all_shifted in zip(*[*_get_optimal_weights([particles[i] for particles in all_particles]) for i in range(3)]):
+            for all_data, all_randoms, all_shifted in zip(*[_get_optimal_weights([particles[i] for particles in all_particles]) for i in range(3)]):
                 # all_data, all_randoms, all_shifted are tuples of ParticleField with optimal weights applied
                 _all_particles = list(zip(all_data, all_randoms, all_shifted))
-                _result = _compute_spectrum(_all_particles, ells=ell, ifields=ifields)
-                for key in result:  # raw, cut, auw
+                _result = _compute_spectrum(_all_particles, ells=[ell], ifields=ifields)
+                for key in _result:  # raw, cut, auw
                     result_ell.setdefault(key, [])
                     result_ell[key].append(_result[key])
-            for key, value in result_ell.items():  # sum 1<->2
-                result.setdefault(key, [])
-                result[key].append(types.sum(value))
-        for key in results:  # join multipoles
-            results[key] = types.join(results[key])
+            for key, value in result_ell.items():
+                results.setdefault(key, [])
+                results[key].append(types.sum(value))  # sum 1<->2
+        for key in results:
+            results[key] = types.join(results[key])  # join multipoles
 
     if len(results) == 1:
         return next(iter(results.values()))
     return results
-
 
 
 def compute_window_mesh2_spectrum(*get_randoms, spectrum, kind='smooth', optimal_weights=None):
