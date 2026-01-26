@@ -54,7 +54,7 @@ def run_stats(tracer='LRG', version='abacus-2ndgen-complete', imocks=[0], stats_
     for imock in imocks:
         regions = ['NGC', 'SGC']
         for region in regions:
-            options = dict(catalog=dict(version=version, tracer=tracer, zrange=zranges, region=region, imock=imock), mesh2_spectrum={})
+            options = dict(catalog=dict(version=version, tracer=tracer, zrange=zranges, region=region, imock=imock), mesh2_spectrum={}, window_mesh3_spectrum={'buffer_size': 5})
             options = fill_fiducial_options(options)
             compute_stats_from_options(stats, get_stats_fn=functools.partial(tools.get_stats_fn, stats_dir=stats_dir), cache=cache, **options)
         jax.experimental.multihost_utils.sync_global_devices('measurements')
@@ -67,7 +67,8 @@ if __name__ == '__main__':
 
     mode = 'interactive'
     #stats = ['mesh2_spectrum']
-    stats = ['window_mesh2_spectrum']
+    #stats = ['window_mesh2_spectrum']
+    stats = ['window_mesh3_spectrum']
     imocks = np.arange(25)
 
     stats_dir = Path('/global/cfs/cdirs/desi/mocks/cai/LSS/DA2/mocks/desipipe')

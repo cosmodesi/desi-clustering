@@ -178,6 +178,7 @@ def compute_window_mesh3_spectrum(*get_data_randoms, spectrum, ibatch: tuple=Non
                     alpha = pole.attrs[f'wsum_data{min(iran, len(all_randoms) - 1):d}'] / randoms.weights.sum()
                     meshes.append(alpha * randoms.paint(**kw_paint, out='real'))
             correlation = jitted_compute_mesh3_correlation(meshes, bin=sbin, los=los).clone(norm=[np.mean(norm)] * len(sbin.ells))
+            jax.block_until_ready(correlation)
             correlation = interpolate_window_function(correlation.unravel(), coords=coords, order=3)
             correlations.append(correlation)
 
