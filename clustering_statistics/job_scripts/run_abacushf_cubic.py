@@ -18,59 +18,11 @@ from clustering_statistics.tools_abacushf_cubic import (
     get_hf_stats_fn,
     get_clustering_positions_weights
 )
+from clustering_statistics.spectrum2_tools import compute_box_mesh2_spectrum
+from clustering_statistics.spectrum3_tools import compute_box_mesh3_spectrum
 from mockfactory import setup_logging
 
 logger = logging.getLogger('run_abacushf_cubic')
-
-def compute_jaxpower_mesh2_spectrum(output_fn, get_data, get_shifted=None, ells=(0, 2, 4), los='z', cache=None, **attrs):
-    import jax
-    from jaxpower import (ParticleField, FKPField, compute_box2_normalization, compute_fkp2_shotnoise, BinMesh2SpectrumPoles, get_mesh_attrs, compute_mesh2_spectrum)
-    mattrs = get_mesh_attrs(boxcenter=0., **attrs)
-    data = ParticleField(*get_data(), attrs=mattrs, exchange=True, backend='jax')
-    if cache is None: cache = {}
-    bin = cache.get('bin_mesh2_spectrum', None)
-    if bin is None: bin = BinMesh2SpectrumPoles(mattrs, edges={'step': 0.001}, ells=ells)
-    cache.setdefault('bin_mesh2_spectrum', bin)
-    norm = compute_box2_normalization(data, bin=bin)
-    wsum_data1 = data.sum()
-    if get_shifted is not None:
-        data = FKPField(data, ParticleField(*get_shifted(), attrs=mattrs, exchange=True, backend='jax'))
-    num_shotnoise = compute_fkp2_shotnoise(data, bin=bin)
-    mesh = data.paint(resampler='tsc', interlacing=3, compensate=True, out='real')
-    mesh = mesh - mesh.mean()
-    del data
-    jitted_compute_mesh2_spectrum = jax.jit(compute_mesh2_spectrum, static_argnames=['los'], donate_argnums=[0])
-    spectrum = jitted_compute_mesh2_spectrum(mesh, bin=bin, los=los).clone(norm=norm, num_shotnoise=num_shotnoise)
-    mattrs = {name: mattrs[name] for name in ['boxsize', 'boxcenter', 'meshsize']}
-    spectrum = spectrum.clone(attrs=dict(los=los, wsum_data1=wsum_data1, **mattrs))
-    if output_fn is not None and jax.process_index() == 0:
-        logger.info(f'Writing to {output_fn}')
-        spectrum.write(output_fn)
-    return spectrum
-
-def compute_jaxpower_mesh3_spectrum(output_fn, get_data, get_shifted=None, basis='scoccimarro', ells=[0, 2], los='z', mask_edges=None, cache=None, **attrs):
-    import jax
-    from jaxpower import (ParticleField, FKPField, compute_box3_normalization, compute_fkp3_shotnoise, BinMesh3SpectrumPoles, get_mesh_attrs, compute_mesh3_spectrum)
-    mattrs = get_mesh_attrs(boxcenter=0., **attrs)
-    data = ParticleField(*get_data(), attrs=mattrs, exchange=True, backend='jax')
-    edges = {'step': 0.01 if 'scoccimarro' in basis else 0.005}
-    if cache is None: cache = {}
-    bin = cache.get(f'bin_mesh3_spectrum_{basis}', None)
-    if bin is None: bin = BinMesh3SpectrumPoles(mattrs, edges=edges, basis=basis, ells=ells, buffer_size=16, mask_edges=mask_edges)
-    cache.setdefault(f'bin_mesh3_spectrum_{basis}', bin)
-    norm = compute_box3_normalization(data, bin=bin)
-    if get_shifted is not None:
-        data = FKPField(data, ParticleField(*get_shifted(), attrs=mattrs, exchange=True, backend='jax'))
-    kw = dict(resampler='tsc', interlacing=3, compensate=True)
-    num_shotnoise = compute_fkp3_shotnoise(data, los=los, bin=bin, **kw)
-    mesh = data.paint(**kw, out='real')
-    mesh = mesh - mesh.mean()
-    spectrum = compute_mesh3_spectrum(mesh, los=los, bin=bin)
-    spectrum = spectrum.clone(norm=norm, num_shotnoise=num_shotnoise)
-    if output_fn is not None and jax.process_index() == 0:
-        logger.info(f'Writing to {output_fn}')
-        spectrum.write(output_fn)
-    return spectrum
 
 @dataclass(frozen=True)
 class Task:
@@ -150,9 +102,12 @@ def run_task(task: Task, todo: set[str], spectrum_args: dict, overwrite: bool = 
         out_fn = get_hf_stats_fn(**stats_common, kind="mesh2_spectrum")
         if not _maybe_skip(out_fn, overwrite):
             with create_sharding_mesh():
-                compute_jaxpower_mesh2_spectrum(
-                    out_fn, get_data, get_shifted=GET_SHIFTED, cache=cache, **spectrum_args
+                spectrum = compute_box_mesh2_spectrum(
+                    get_data, get_shifted=GET_SHIFTED, cache=cache, **spectrum_args
                 )
+                if out_fn is not None and jax.process_index() == 0:
+                    logger.info(f'Writing to {out_fn}')
+                    spectrum.write(out_fn)
                 jax.clear_caches()
 
     if "mesh3_spectrum_scoccimarro" in todo:
@@ -160,9 +115,12 @@ def run_task(task: Task, todo: set[str], spectrum_args: dict, overwrite: bool = 
         out_fn = get_hf_stats_fn(**stats_common, kind="mesh3_spectrum", basis=bargs["basis"])
         if not _maybe_skip(out_fn, overwrite):
             with create_sharding_mesh():
-                compute_jaxpower_mesh3_spectrum(
-                    out_fn, get_data, get_shifted=GET_SHIFTED, cache=cache, **bargs
+                spectrum = compute_box_mesh3_spectrum(
+                    get_data, get_shifted=GET_SHIFTED, cache=cache, **bargs
                 )
+                if out_fn is not None and jax.process_index() == 0:
+                    logger.info(f'Writing to {out_fn}')
+                    spectrum.write(out_fn)
                 jax.clear_caches()
 
     if "mesh3_spectrum_sugiyama" in todo:
@@ -174,9 +132,12 @@ def run_task(task: Task, todo: set[str], spectrum_args: dict, overwrite: bool = 
         out_fn = get_hf_stats_fn(**stats_common, kind="mesh3_spectrum", basis=bargs["basis"])
         if not _maybe_skip(out_fn, overwrite):
             with create_sharding_mesh():
-                compute_jaxpower_mesh3_spectrum(
-                    out_fn, get_data, get_shifted=GET_SHIFTED, cache=cache, los=task.los, **bargs
+                spectrum = compute_box_mesh3_spectrum(
+                    get_data, get_shifted=GET_SHIFTED, cache=cache, los=task.los, **bargs
                 )
+                if out_fn is not None and jax.process_index() == 0:
+                    logger.info(f'Writing to {out_fn}')
+                    spectrum.write(out_fn)
                 jax.clear_caches()
 
 
